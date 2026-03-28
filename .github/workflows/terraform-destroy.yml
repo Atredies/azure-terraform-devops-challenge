@@ -1,0 +1,92 @@
+# Terraform Destroy Workflow
+#
+# DANGER: This workflow destroys ALL infrastructure in the selected environment.
+# It requires manual dispatch with a typed confirmation to prevent accidental deletion.
+#
+# Usage:
+#   GitHub Actions UI -> Workflows -> Terraform Destroy -> Run workflow
+#   Select environment and type "destroy-{environment}" in the confirm_destroy field.
+
+name: 'Terraform Destroy'
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment to destroy (dev or prod)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      confirm_destroy:
+        description: 'Type "destroy-dev" or "destroy-prod" to confirm'
+        required: true
+        type: string
+
+env:
+  TF_VERSION: '1.5.7'
+  WORKING_DIR: '.'
+  TARGET_ENV: ${{ github.event.inputs.environment }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  destroy:
+    name: 'Destroy - ${{ github.event.inputs.environment }}'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+
+    env:
+      TF_VAR_ssh_public_key: ${{ secrets.TF_VAR_ssh_public_key }}
+      CONFIRM_INPUT: ${{ github.event.inputs.confirm_destroy }}
+
+    steps:
+      - name: Validate Confirmation
+        # All values read from env, not inline context expressions — safe from injection
+        run: |
+          EXPECTED="destroy-${TARGET_ENV}"
+          if [ "${CONFIRM_INPUT}" != "${EXPECTED}" ]; then
+            echo "ERROR: Confirmation string does not match expected '${EXPECTED}'"
+            echo "Destroy operation CANCELLED."
+            exit 1
+          fi
+          echo "Confirmation validated. Proceeding with destroy for: ${TARGET_ENV}"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set environment working directory
+        id: set-env-dir
+        run: echo "env_dir=${WORKING_DIR}/environments/${TARGET_ENV}" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ${{ steps.set-env-dir.outputs.env_dir }}
+
+      - name: Terraform Destroy Plan
+        run: |
+          terraform plan \
+            -destroy \
+            -var-file=terraform.tfvars \
+            -out=destroy-plan \
+            -no-color
+        working-directory: ${{ steps.set-env-dir.outputs.env_dir }}
+
+      - name: Terraform Destroy Apply
+        run: terraform apply -auto-approve destroy-plan
+        working-directory: ${{ steps.set-env-dir.outputs.env_dir }}
